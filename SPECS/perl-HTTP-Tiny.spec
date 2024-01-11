@@ -1,6 +1,9 @@
+# Run optional test
+%bcond_without perl_HTTP_Tiny_enables_optional_deps
+
 Name:           perl-HTTP-Tiny
 Version:        0.074
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Small, simple, correct HTTP/1.1 client
 License:        GPL+ or Artistic
 URL:            https://metacpan.org/release/HTTP-Tiny
@@ -8,10 +11,15 @@ Source0:        https://cpan.metacpan.org/authors/id/D/DA/DAGOLDEN/HTTP-Tiny-%{v
 # Check for write failure, bug #1031096, refused by upstream,
 # <https://github.com/chansen/p5-http-tiny/issues/32>
 Patch0:         HTTP-Tiny-0.070-Croak-on-failed-write-into-a-file.patch
+# Change verify_SSL default to 1, add ENV var to enable insecure default
+# Fix rhbz#2228409 - CVE-2023-31486
+Patch1:         HTTP-Tiny-0.074-Change-verify_SSL-default-to-1-add-ENV-var-to-enable.patch
 BuildArch:      noarch
+BuildRequires:  coreutils
 BuildRequires:  make
 BuildRequires:  perl-generators
 BuildRequires:  perl-interpreter
+BuildRequires:  perl(Config)
 BuildRequires:  perl(ExtUtils::MakeMaker) >= 6.76
 BuildRequires:  perl(strict)
 BuildRequires:  perl(warnings)
@@ -49,10 +57,23 @@ Requires:       perl(bytes)
 Requires:       perl(Carp)
 Requires:       perl(Fcntl)
 Recommends:     perl(IO::Socket::IP) >= 0.32
+%if !%{defined perl_bootstrap}
+Requires:       perl(IO::Socket::SSL) >= 1.56
+Requires:       perl(Mozilla::CA)
+Requires:       perl(Net::SSLeay) >= 1.49
+%else
 Recommends:     perl(IO::Socket::SSL) >= 1.56
-Requires:       perl(MIME::Base64)
 Recommends:     perl(Mozilla::CA)
+Recommends:     perl(Net::SSLeay) >= 1.49
+%endif
+Requires:       perl(MIME::Base64)
 Requires:       perl(Time::Local)
+
+# Filter modules bundled for tests
+%global __provides_exclude_from %{?__provides_exclude_from:%__provides_exclude_from|}^%{_libexecdir}
+%global __requires_exclude %{?__requires_exclude:%__requires_exclude|}^perl\\(Util\\)
+%global __requires_exclude %{__requires_exclude}|^perl\\(BrokenCookieJar\\)
+%global __requires_exclude %{__requires_exclude}|^perl\\(SimpleCookieJar\\)
 
 %description
 This is a very simple HTTP/1.1 client, designed for doing simple GET requests
@@ -62,9 +83,32 @@ It is more correct and more complete than HTTP::Lite. It supports proxies
 (currently only non-authenticating ones) and redirection. It also correctly
 resumes after EINTR.
 
+%package tests
+Summary:        Tests for %{name}
+Requires:       %{name} = %{?epoch:%{epoch}:}%{version}-%{release}
+Requires:       perl-Test-Harness
+%if %{with perl_HTTP_Tiny_enables_optional_deps} && !%{defined perl_bootstrap}
+Requires:       openssl
+Requires:       perl(IO::Socket::IP) >= 0.32
+Requires:       perl(IO::Socket::SSL) >= 1.56
+Requires:       perl(Mozilla::CA)
+Requires:       perl(Net::SSLeay) >= 1.49
+%endif
+
+%description tests
+Tests from %{name}. Execute them
+with "%{_libexecdir}/%{name}/test".
+
 %prep
 %setup -q -n HTTP-Tiny-%{version}
-%patch0 -p1
+%patch -P0 -p1
+%patch -P1 -p1
+
+# Help generators to recognize Perl scripts
+for F in t/*.t; do
+    perl -i -MConfig -ple 'print $Config{startperl} if $. == 1 && !s{\A#!.*perl\b}{$Config{startperl}}' "$F"
+    chmod +x "$F"
+done
 
 %build
 perl Makefile.PL INSTALLDIRS=vendor NO_PACKLIST=1
@@ -74,7 +118,17 @@ make %{?_smp_mflags}
 make pure_install DESTDIR='%{buildroot}'
 %{_fixperms} '%{buildroot}'/*
 
+# Install tests
+mkdir -p %{buildroot}%{_libexecdir}/%{name}
+cp -a t corpus %{buildroot}%{_libexecdir}/%{name}
+cat > %{buildroot}%{_libexecdir}/%{name}/test << 'EOF'
+#!/bin/sh
+cd %{_libexecdir}/%{name} && AUTOMATED_TESTING=1 exec prove -I . -j "$(getconf _NPROCESSORS_ONLN)"
+EOF
+chmod +x %{buildroot}%{_libexecdir}/%{name}/test
+
 %check
+export HARNESS_OPTIONS=j$(perl -e 'if ($ARGV[0] =~ /.*-j([0-9][0-9]*).*/) {print $1} else {print 1}' -- '%{?_smp_mflags}')
 make test
 
 %files
@@ -83,7 +137,14 @@ make test
 %{perl_vendorlib}/*
 %{_mandir}/man3/*
 
+%files tests
+%{_libexecdir}/%{name}
+
 %changelog
+* Mon Aug 07 2023 Jitka Plesnikova <jplesnik@redhat.com> - 0.074-2
+- Changes the verify_SSL default parameter from 0 to 1 - CVE-2023-31486
+- Resolves: rhbz#2228409
+
 * Tue Jul 31 2018 Petr Pisar <ppisar@redhat.com> - 0.074-1
 - 0.074 bump
 
